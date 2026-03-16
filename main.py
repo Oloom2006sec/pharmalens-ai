@@ -10,7 +10,7 @@ import io
 
 app = FastAPI()
 
-client = genai.Client(api_key="AIzaSyCSMaFZhTQPI7E04IlC5TUq_cRNhyw_Qdk")
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 CACHE_DIR = "cache"
 
 if not os.path.exists(CACHE_DIR):

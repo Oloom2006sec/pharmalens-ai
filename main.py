@@ -11,7 +11,7 @@ import io
 app = FastAPI()
 
 # Gemini client
-client = genai.Client(api_key=os.getenv("AIzaSyCSMaFZhTQPI7E04IlC5TUq_cRNhyw_Qdk"))
+client = genai.Client(api_key="AIzaSyCSMaFZhTQPI7E04IlC5TUq_cRNhyw_Qdk")
 
 CACHE_DIR = "cache"
 

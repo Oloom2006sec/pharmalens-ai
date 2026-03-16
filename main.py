@@ -10,16 +10,52 @@ import io
 
 app = FastAPI()
 
-client = genai.Client(api_key="AIzaSyCSMaFZhTQPI7E04IlC5TUq_cRNhyw_Qdk")
+# Gemini client
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 CACHE_DIR = "cache"
 
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
-# -----------------------------
+
+# -------------------------
+# SAFE GEMINI CALL
+# -------------------------
+
+def ask_gemini(prompt):
+
+    try:
+        r = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+        return r.text
+    except Exception as e:
+        return f"Gemini Error: {str(e)}"
+
+
+# -------------------------
+# SAFE JSON PARSER
+# -------------------------
+
+def safe_json(text, default):
+
+    try:
+        match = re.search(r"\{[\s\S]*\}", text)
+
+        if match:
+            return json.loads(match.group())
+
+        return default
+
+    except Exception:
+        return default
+
+
+# -------------------------
 # HASH
-# -----------------------------
+# -------------------------
 
 def file_hash(file_bytes):
 
@@ -29,40 +65,9 @@ def file_hash(file_bytes):
     return sha.hexdigest()
 
 
-# -----------------------------
-# HPLC PARAMETER EXTRACTION
-# -----------------------------
-
-def extract_hplc_params(text):
-
-    params = {}
-
-    col = re.search(r'column.*?\((.*?)\)', text, re.I)
-    if col:
-        params["column"] = col.group()
-
-    flow = re.search(r'flow rate.*?([\d\.]+\s?mL/?min)', text, re.I)
-    if flow:
-        params["flow"] = flow.group(1)
-
-    wave = re.search(r'wavelength.*?([\d]+\s?nm)', text, re.I)
-    if wave:
-        params["wavelength"] = wave.group(1)
-
-    inj = re.search(r'inject.*?([\d]+\s?µ?L)', text, re.I)
-    if inj:
-        params["inj"] = inj.group(1)
-
-    mobile = re.search(r'mobile phase[:\-]?(.*?)(flow rate|column|detection)', text, re.I | re.S)
-    if mobile:
-        params["mobile"] = mobile.group(1)
-
-    return params
-
-
-# -----------------------------
-# HOME PAGE
-# -----------------------------
+# -------------------------
+# HOME
+# -------------------------
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -70,7 +75,6 @@ def home():
     return """
 
 <html>
-
 <head>
 
 <title>PharmaLens AI</title>
@@ -137,7 +141,7 @@ border-radius:6px;
 
 <div class="card">
 
-<h3>Analyze Certificate of Analysis</h3>
+<h3>Analyze COA</h3>
 
 <form action="/analyze-coa" method="post" enctype="multipart/form-data">
 
@@ -152,46 +156,40 @@ border-radius:6px;
 </div>
 
 </body>
-
 </html>
 
 """
 
 
-# -----------------------------
-# ASK AI
-# -----------------------------
+# -------------------------
+# ASK
+# -------------------------
 
 @app.get("/ask")
-def ask(question:str):
+def ask(question: str):
 
-    r = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=question
-    )
+    answer = ask_gemini(question)
 
     return HTMLResponse(f"""
 
 <html>
-
 <body style="font-family:Arial;padding:40px">
 
 <h2>AI Answer</h2>
 
 <pre style="white-space:pre-wrap">
-{r.text}
+{answer}
 </pre>
 
 </body>
-
 </html>
 
 """)
 
 
-# -----------------------------
-# ANALYZE PHARMACOPOEIA
-# -----------------------------
+# -------------------------
+# ANALYZE PDF
+# -------------------------
 
 @app.post("/analyze-pdf")
 async def analyze_pdf(file: UploadFile = File(...)):
@@ -211,27 +209,21 @@ async def analyze_pdf(file: UploadFile = File(...)):
 
         reader = PdfReader(io.BytesIO(file_bytes))
 
-        text=""
+        text = ""
 
         for page in reader.pages:
 
-            t=page.extract_text()
+            t = page.extract_text()
 
             if t:
-                text+=t
+                text += t
 
 
-        response = client.models.generate_content(
+        prompt = f"""
 
-            model="gemini-2.5-flash",
+Extract pharmaceutical QC tests from this pharmacopoeia text.
 
-            contents=f"""
-
-You are pharmaceutical QC expert.
-
-Extract QC tests.
-
-Return JSON.
+Return JSON:
 
 {{
 "tests":[
@@ -239,206 +231,45 @@ Return JSON.
 ]
 }}
 
-Document:
-
 {text}
 
 """
+
+        response_text = ask_gemini(prompt)
+
+        data = safe_json(
+            response_text,
+            {"tests":[{"name":"Analysis","limit":"","details":response_text}]}
         )
-
-        match=re.search(r"\{[\s\S]*\}",response.text)
-
-        if match:
-            data=json.loads(match.group())
-        else:
-            data={"tests":[{"name":"analysis","details":response.text}]}
 
         with open(cache_file,"w") as f:
             json.dump(data,f)
 
 
-    tests=data.get("tests",[])
+    rows = ""
 
-    tabs=""
-    sections=""
-    rows=""
-    sop_all=""
+    for t in data["tests"]:
 
-    for i,t in enumerate(tests):
-
-        name=t.get("name","")
-        limit=t.get("limit","")
-        details=t.get("details","")
-
-        technique=""
-
-        text_all=(name+details).lower()
-
-        if "chromatograph" in text_all:
-            technique="HPLC"
-
-        elif "titration" in text_all:
-            technique="Titration"
-
-        elif "uv" in text_all:
-            technique="UV"
-
-        elif "infrared" in text_all:
-            technique="IR"
-
-        elif "melting" in text_all:
-            technique="Melting Point"
-
-        elif "drying" in text_all:
-            technique="Gravimetric"
-
-
-        params_html=""
-
-        if technique=="HPLC":
-
-            p=extract_hplc_params(details)
-
-            if p:
-
-                params_html+="<b>Chromatographic Conditions</b><br>"
-
-                if "column" in p:
-                    params_html+=f"Column: {p['column']}<br>"
-
-                if "mobile" in p:
-                    params_html+=f"Mobile phase: {p['mobile']}<br>"
-
-                if "flow" in p:
-                    params_html+=f"Flow rate: {p['flow']}<br>"
-
-                if "wavelength" in p:
-                    params_html+=f"Wavelength: {p['wavelength']}<br>"
-
-                if "inj" in p:
-                    params_html+=f"Injection volume: {p['inj']}<br>"
-
-                params_html+="<br>"
-
-
-        tab=f"tab{i}"
-        active="active" if i==0 else ""
-
-        tabs+=f'<div class="tab {active}" id="btn_{tab}" onclick="openTab(\'{tab}\')">{name}</div>'
-
-
-        sections+=f"""
-
-<div class="section {active}" id="{tab}">
-
-<h3>{name}</h3>
-
-<b>Technique:</b> {technique}<br>
-<b>Limit:</b> {limit}<br><br>
-
-{params_html}
-
-<h4>Description</h4>
-
-<pre style="white-space:pre-wrap">{details}</pre>
-
-</div>
-
-"""
-
-
-        rows+=f"""
+        rows += f"""
 <tr>
-<td>{name}</td>
-<td>{technique}</td>
-<td>{limit}</td>
+<td>{t.get("name","")}</td>
+<td>{t.get("limit","")}</td>
 </tr>
 """
 
 
-        sop_all+=f"""
-
-<h3>{name}</h3>
-
-Technique: {technique}
-
-Limit: {limit}
-
-{details}
-
-<hr>
-
-"""
-
-
-    tabs+=f'<div class="tab" id="btn_sop" onclick="openTab(\'sop\')">SOP</div>'
-
-    sections+=f"""
-
-<div class="section" id="sop">
-
-<h2>QC Laboratory SOP</h2>
-
-{sop_all}
-
-</div>
-
-"""
-
-
-    html=f"""
+    return HTMLResponse(f"""
 
 <html>
 
-<head>
+<body style="font-family:Segoe UI;padding:40px">
 
-<style>
+<h2>QC Tests</h2>
 
-body{{font-family:Segoe UI;background:#eef2f7;padding:40px}}
-
-table{{width:100%;border-collapse:collapse;background:white}}
-
-th,td{{padding:10px;border:1px solid #ddd}}
-
-th{{background:#1a73e8;color:white}}
-
-.tabs{{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap}}
-
-.tab{{background:white;padding:8px 16px;border-radius:6px;cursor:pointer}}
-
-.tab.active{{background:#1a73e8;color:white}}
-
-.section{{display:none;background:white;padding:20px;border-radius:10px;margin-top:10px}}
-
-.section.active{{display:block}}
-
-</style>
-
-<script>
-
-function openTab(id){{
-document.querySelectorAll('.section').forEach(x=>x.classList.remove('active'))
-document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'))
-
-document.getElementById(id).classList.add('active')
-document.getElementById('btn_'+id).classList.add('active')
-}}
-
-</script>
-
-</head>
-
-<body>
-
-<h1>PharmaLens AI QC Dashboard</h1>
-
-<h2>QC Summary</h2>
-
-<table>
+<table border="1" cellpadding="10">
 
 <tr>
 <th>Test</th>
-<th>Technique</th>
 <th>Limit</th>
 </tr>
 
@@ -446,26 +277,16 @@ document.getElementById('btn_'+id).classList.add('active')
 
 </table>
 
-<div class="tabs">
-
-{tabs}
-
-</div>
-
-{sections}
-
 </body>
 
 </html>
 
-"""
-
-    return HTMLResponse(html)
+""")
 
 
-# -----------------------------
-# COA ANALYZER
-# -----------------------------
+# -------------------------
+# ANALYZE COA
+# -------------------------
 
 @app.post("/analyze-coa")
 async def analyze_coa(file: UploadFile = File(...)):
@@ -474,32 +295,19 @@ async def analyze_coa(file: UploadFile = File(...)):
 
     reader = PdfReader(io.BytesIO(file_bytes))
 
-    text=""
+    text = ""
 
     for page in reader.pages:
 
-        t=page.extract_text()
+        t = page.extract_text()
 
         if t:
-            text+=t
+            text += t
 
 
-    response = client.models.generate_content(
+    prompt = f"""
 
-        model="gemini-2.5-flash",
-
-        contents=f"""
-
-You are pharmaceutical QC expert.
-
-Analyze Certificate of Analysis.
-
-Extract:
-
-Test
-Result
-Specification
-Status (Pass or Fail)
+Analyze this Certificate of Analysis.
 
 Return JSON:
 
@@ -512,70 +320,51 @@ Return JSON:
 {text}
 
 """
+
+    response_text = ask_gemini(prompt)
+
+    data = safe_json(
+        response_text,
+        {"coa":[{"test":"analysis","result":"","spec":"","status":""}]}
     )
 
-    match=re.search(r"\{[\s\S]*\}",response.text)
 
-    if match:
-        data=json.loads(match.group())
-    else:
-        return HTMLResponse("<h2>Parsing Error</h2>")
-
-
-    rows=""
+    rows = ""
 
     for t in data["coa"]:
 
-        test=t.get("test","")
-        result=t.get("result","")
-        spec=t.get("spec","")
-        status=t.get("status","")
+        status = t.get("status","")
 
-        color="green"
+        color = "green"
 
         if "fail" in status.lower():
-            color="red"
+            color = "red"
 
-        rows+=f"""
+
+        rows += f"""
 <tr>
-<td>{test}</td>
-<td>{result}</td>
-<td>{spec}</td>
+<td>{t.get("test","")}</td>
+<td>{t.get("result","")}</td>
+<td>{t.get("spec","")}</td>
 <td style="color:{color};font-weight:bold">{status}</td>
 </tr>
 """
 
 
-    html=f"""
+    return HTMLResponse(f"""
 
 <html>
 
-<head>
+<body style="font-family:Segoe UI;padding:40px">
 
-<style>
+<h2>COA Analysis</h2>
 
-body{{font-family:Segoe UI;background:#eef2f7;padding:40px}}
-
-table{{width:100%;border-collapse:collapse;background:white}}
-
-th,td{{padding:10px;border:1px solid #ddd}}
-
-th{{background:#1a73e8;color:white}}
-
-</style>
-
-</head>
-
-<body>
-
-<h1>PharmaLens COA Analyzer</h1>
-
-<table>
+<table border="1" cellpadding="10">
 
 <tr>
 <th>Test</th>
 <th>Result</th>
-<th>Specification</th>
+<th>Spec</th>
 <th>Status</th>
 </tr>
 
@@ -587,6 +376,4 @@ th{{background:#1a73e8;color:white}}
 
 </html>
 
-"""
-
-    return HTMLResponse(html)
+""")
